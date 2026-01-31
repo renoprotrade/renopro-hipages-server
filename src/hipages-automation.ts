@@ -1,38 +1,45 @@
+/**
+ * HiPages Puppeteer Automation
+ *
+ * Automates the HiPages job posting flow
+ */
+
 import puppeteer, { Browser, Page } from 'puppeteer';
+import { HiPagesJobRequest, HiPagesJobStatus } from './types';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { HiPagesJobRequest, HiPagesJobStatus } from './types';
 
-interface SessionData {
-  browser: Browser;
-  page: Page;
-  jobData: HiPagesJobRequest;
-  status: HiPagesJobStatus;
-}
+// Store active browser sessions
+const activeSessions: Map<string, { browser: Browser; page: Page; status: HiPagesJobStatus }> = new Map();
 
-const activeSessions: Map<string, SessionData> = new Map();
-
+/**
+ * Promise-based delay helper
+ */
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * Find a button by text content and click it
+ */
 async function findAndClickButton(page: Page, texts: string[]): Promise<boolean> {
   for (const text of texts) {
-    try {
-      const buttons = await page.$$('button, input[type="submit"], a.btn, a.button');
-      for (const button of buttons) {
-        const buttonText = await page.evaluate(el => el.textContent?.trim().toLowerCase() || '', button);
-        if (buttonText.includes(text.toLowerCase())) {
-          await button.click();
-          return true;
-        }
+    const buttons = await page.$$('button, input[type="submit"], a');
+    for (const button of buttons) {
+      const buttonText = await page.evaluate(el => el.textContent?.toLowerCase() || '', button);
+      if (buttonText.includes(text.toLowerCase())) {
+        await button.click();
+        return true;
       }
-    } catch {}
+    }
   }
   return false;
 }
 
+/**
+ * Start a new HiPages job posting session
+ */
 export async function startJobPosting(
   jobId: string,
   jobData: HiPagesJobRequest,
@@ -41,11 +48,20 @@ export async function startJobPosting(
   let browser: Browser | null = null;
 
   try {
-    onStatusUpdate({
-      jobId,
-      status: 'pending',
-      message: 'Launching browser...'
-    });
+    const updateStatus = (status: Partial<HiPagesJobStatus>) => {
+      const currentStatus = activeSessions.get(jobId)?.status || {
+        jobId,
+        status: 'pending',
+        message: 'Starting...',
+      };
+      const newStatus = { ...currentStatus, ...status } as HiPagesJobStatus;
+      if (activeSessions.has(jobId)) {
+        activeSessions.get(jobId)!.status = newStatus;
+      }
+      onStatusUpdate(newStatus);
+    };
+
+    updateStatus({ status: 'pending', message: 'Launching browser...' });
 
     const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
 
@@ -64,117 +80,70 @@ export async function startJobPosting(
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
+    await page.setUserAgent(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    );
 
     activeSessions.set(jobId, {
       browser,
       page,
-      jobData,
-      status: { jobId, status: 'filling_form', message: 'Starting...' }
+      status: { jobId, status: 'pending', message: 'Browser launched' },
     });
 
-    onStatusUpdate({
-      jobId,
-      status: 'filling_form',
-      message: 'Navigating to HiPages...'
-    });
+    updateStatus({ status: 'filling_form', message: 'Navigating to HiPages...' });
 
-    await page.goto('https://hipages.com.au/get-quotes', {
+    await page.goto('https://www.hipages.com.au/get-quotes', {
       waitUntil: 'networkidle2',
-      timeout: 30000
+      timeout: 30000,
     });
 
-    onStatusUpdate({
-      jobId,
-      status: 'filling_form',
-      message: 'Selecting category...'
-    });
+    await page.waitForSelector('input', { timeout: 10000 });
 
+    updateStatus({ message: 'Filling category...' });
     await fillCategory(page, jobData.categoryName);
 
-    onStatusUpdate({
-      jobId,
-      status: 'filling_form',
-      message: 'Entering location...'
-    });
-
+    updateStatus({ message: 'Filling location...' });
     await fillLocation(page, jobData.postcode);
 
-    onStatusUpdate({
-      jobId,
-      status: 'filling_form',
-      message: 'Getting quotes form...'
-    });
-
     await clickGetQuotes(page);
-    await delay(2000);
 
-    onStatusUpdate({
-      jobId,
-      status: 'filling_form',
-      message: 'Answering questions...'
-    });
+    updateStatus({ message: 'Answering questions...' });
+    await answerFormQuestions(page);
 
-    await answerFormQuestions(page, jobData);
-
-    onStatusUpdate({
-      jobId,
-      status: 'filling_form',
-      message: 'Adding job description...'
-    });
-
+    updateStatus({ message: 'Filling job description...' });
     await fillDescription(page, jobData.description);
 
     if (jobData.photos?.original || jobData.photos?.visualization) {
-      onStatusUpdate({
-        jobId,
-        status: 'uploading_photos',
-        message: 'Uploading photos...'
-      });
-
+      updateStatus({ status: 'uploading_photos', message: 'Uploading photos...' });
       await uploadPhotos(page, jobData.photos);
     }
 
-    onStatusUpdate({
-      jobId,
-      status: 'filling_form',
-      message: 'Entering contact details...'
-    });
-
+    updateStatus({ message: 'Filling contact details...' });
     await fillContactDetails(page, jobData.contact);
 
-    onStatusUpdate({
-      jobId,
-      status: 'awaiting_otp',
-      message: 'Please enter the verification code sent to your phone'
-    });
-
-    const session = activeSessions.get(jobId);
-    if (session) {
-      session.status = {
-        jobId,
-        status: 'awaiting_otp',
-        message: 'Waiting for OTP verification'
-      };
-    }
+    updateStatus({ status: 'awaiting_otp', message: `Enter the code sent to ${jobData.contact.phone}` });
 
   } catch (error) {
-    console.error(`[Job ${jobId}] Error:`, error);
+    console.error('[HiPages] Error during job posting:', error);
 
     if (browser) {
-      await browser.close().catch(() => {});
+      await browser.close();
     }
     activeSessions.delete(jobId);
 
     onStatusUpdate({
       jobId,
       status: 'failed',
-      message: 'Job posting failed',
-      error: error instanceof Error ? error.message : 'Unknown error'
+      message: 'Failed to post job',
+      error: error instanceof Error ? error.message : 'Unknown error',
     });
   }
 }
 
-export async function submitOtp(jobId: string, otp: string): Promise<HiPagesJobStatus> {
+/**
+ * Submit OTP code to complete the job posting
+ */
+export async function submitOtp(jobId: string, otpCode: string): Promise<HiPagesJobStatus> {
   const session = activeSessions.get(jobId);
 
   if (!session) {
@@ -182,33 +151,28 @@ export async function submitOtp(jobId: string, otp: string): Promise<HiPagesJobS
       jobId,
       status: 'failed',
       message: 'Session not found',
-      error: 'No active session for this job'
+      error: 'No active session for this job ID',
     };
   }
 
-  try {
-    const { page, browser } = session;
+  const { browser, page } = session;
 
-    const otpInput = await page.$('input[type="text"][maxlength="6"], input[name="otp"], input[placeholder*="code"], input[autocomplete="one-time-code"]');
+  try {
+    session.status = { ...session.status, status: 'submitting', message: 'Verifying code...' };
+
+    const otpInput = await page.$('input[type="text"], input[type="number"], input[name*="otp"], input[name*="code"], input[maxlength="6"]');
     if (otpInput) {
-      await otpInput.type(otp, { delay: 100 });
+      await otpInput.click({ clickCount: 3 });
+      await otpInput.type(otpCode, { delay: 50 });
     }
 
     await findAndClickButton(page, ['verify', 'submit', 'confirm']);
 
-    await delay(3000);
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
 
     const currentUrl = page.url();
-    const pageContent = await page.content();
-
-    let hipagesJobId: string | undefined;
-    let hipagesJobUrl: string | undefined;
-
-    const jobIdMatch = currentUrl.match(/job[_-]?id[=\/](\d+)/i) || pageContent.match(/job[_-]?id["\s:]+(\d+)/i);
-    if (jobIdMatch) {
-      hipagesJobId = jobIdMatch[1];
-      hipagesJobUrl = `https://hipages.com.au/jobs/${hipagesJobId}`;
-    }
+    const jobIdMatch = currentUrl.match(/job\/(\d+)/);
+    const hipagesJobId = jobIdMatch ? jobIdMatch[1] : undefined;
 
     await browser.close();
     activeSessions.delete(jobId);
@@ -218,95 +182,123 @@ export async function submitOtp(jobId: string, otp: string): Promise<HiPagesJobS
       status: 'completed',
       message: 'Job posted successfully!',
       hipagesJobId,
-      hipagesJobUrl
+      hipagesJobUrl: hipagesJobId
+        ? `https://www.hipages.com.au/account/job/${hipagesJobId}/interested-businesses`
+        : undefined,
     };
 
   } catch (error) {
-    console.error(`[Job ${jobId}] OTP error:`, error);
+    console.error('[HiPages] Error submitting OTP:', error);
 
-    if (session.browser) {
-      await session.browser.close().catch(() => {});
-    }
+    await browser.close();
     activeSessions.delete(jobId);
 
     return {
       jobId,
       status: 'failed',
-      message: 'Failed to verify OTP',
-      error: error instanceof Error ? error.message : 'Unknown error'
+      message: 'Failed to verify code',
+      error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
 
+/**
+ * Cancel an active session
+ */
 export async function cancelSession(jobId: string): Promise<void> {
   const session = activeSessions.get(jobId);
   if (session) {
-    await session.browser.close().catch(() => {});
+    await session.browser.close();
     activeSessions.delete(jobId);
   }
 }
 
+/**
+ * Get current status of a job
+ */
 export function getJobStatus(jobId: string): HiPagesJobStatus | null {
-  const session = activeSessions.get(jobId);
-  return session?.status || null;
+  return activeSessions.get(jobId)?.status || null;
 }
 
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
 async function fillCategory(page: Page, categoryName: string): Promise<void> {
-  const searchInput = await page.$('input[type="search"], input[placeholder*="search"], input[placeholder*="trade"], input[placeholder*="What"]');
-  if (searchInput) {
-    await searchInput.type(categoryName, { delay: 50 });
+  const inputs = await page.$$('input');
+  if (inputs.length > 0) {
+    const categoryInput = inputs[0];
+    await categoryInput.click();
+    await delay(300);
+    await categoryInput.type(categoryName, { delay: 100 });
     await delay(1500);
-    const suggestion = await page.$('[role="option"], [role="listbox"] li, .suggestion, .autocomplete-item, ul li');
+
+    const suggestion = await page.$('[role="option"], [role="listbox"] li, ul[class*="suggestion"] li, ul[class*="autocomplete"] li');
     if (suggestion) {
       await suggestion.click();
     } else {
       await page.keyboard.press('Enter');
     }
+    await delay(500);
   }
-  await delay(500);
 }
 
 async function fillLocation(page: Page, postcode: string): Promise<void> {
-  const locationInput = await page.$('input[placeholder*="postcode"], input[placeholder*="suburb"], input[placeholder*="location"], input[name*="location"], input[placeholder*="Where"]');
+  const locationInput = await page.$('input[placeholder*="postcode"], input[placeholder*="suburb"], input[placeholder*="location"], input[name*="location"], input[name*="postcode"]');
+
   if (locationInput) {
-    await locationInput.type(postcode, { delay: 50 });
+    await locationInput.click();
+    await delay(300);
+    await locationInput.type(postcode, { delay: 100 });
     await delay(1500);
-    const suggestion = await page.$('[role="option"], [role="listbox"] li, .suggestion, .autocomplete-item, ul li');
+
+    const suggestion = await page.$('[role="option"], [role="listbox"] li, ul[class*="suggestion"] li');
     if (suggestion) {
       await suggestion.click();
+    } else {
+      await page.keyboard.press('Enter');
     }
+    await delay(500);
   }
-  await delay(500);
 }
 
 async function clickGetQuotes(page: Page): Promise<void> {
-  const clicked = await findAndClickButton(page, ['get quotes', 'continue', 'next', 'submit']);
+  const clicked = await findAndClickButton(page, ['get quotes', 'get quote', 'continue', 'next', 'go']);
   if (clicked) {
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
   }
 }
 
-async function answerFormQuestions(page: Page, jobData: HiPagesJobRequest): Promise<void> {
+async function answerFormQuestions(page: Page): Promise<void> {
   await delay(1000);
 
-  const radioButtons = await page.$$('input[type="radio"]');
-  for (const radio of radioButtons.slice(0, 5)) {
-    try {
-      await radio.click();
-      await delay(300);
-    } catch {}
+  for (let i = 0; i < 10; i++) {
+    const textarea = await page.$('textarea');
+    if (textarea) {
+      break;
+    }
+
+    const radioButtons = await page.$$('input[type="radio"]:not(:checked)');
+    if (radioButtons.length > 0) {
+      await radioButtons[0].click();
+      await delay(500);
+    }
+
+    const clicked = await findAndClickButton(page, ['next', 'continue']);
+    if (!clicked) {
+      break;
+    }
+    await delay(1000);
   }
-
-  await findAndClickButton(page, ['continue', 'next']);
-  await delay(1000);
 }
 
 async function fillDescription(page: Page, description: string): Promise<void> {
-  const textarea = await page.$('textarea, input[type="text"][name*="description"], input[name*="details"]');
+  const textarea = await page.$('textarea');
   if (textarea) {
+    await textarea.click();
     await textarea.type(description, { delay: 20 });
+    await delay(500);
   }
-  await delay(500);
 }
 
 async function uploadPhotos(
@@ -314,32 +306,42 @@ async function uploadPhotos(
   photos: { original?: string; visualization?: string }
 ): Promise<void> {
   const fileInput = await page.$('input[type="file"]');
-  if (!fileInput) return;
 
-  const tempFiles: string[] = [];
+  if (!fileInput) {
+    console.log('[HiPages] No file input found, skipping photo upload');
+    return;
+  }
+
+  const tempDir = os.tmpdir();
+  const filesToUpload: string[] = [];
 
   try {
-    if (photos.original && photos.original.startsWith('data:')) {
-      const tempPath = path.join(os.tmpdir(), `hipages_original_${Date.now()}.jpg`);
+    if (photos.original) {
+      const originalPath = path.join(tempDir, `hipages_original_${Date.now()}.jpg`);
       const base64Data = photos.original.replace(/^data:image\/\w+;base64,/, '');
-      fs.writeFileSync(tempPath, base64Data, 'base64');
-      tempFiles.push(tempPath);
+      fs.writeFileSync(originalPath, Buffer.from(base64Data, 'base64'));
+      filesToUpload.push(originalPath);
     }
 
-    if (photos.visualization && photos.visualization.startsWith('data:')) {
-      const tempPath = path.join(os.tmpdir(), `hipages_viz_${Date.now()}.jpg`);
+    if (photos.visualization) {
+      const vizPath = path.join(tempDir, `hipages_viz_${Date.now()}.jpg`);
       const base64Data = photos.visualization.replace(/^data:image\/\w+;base64,/, '');
-      fs.writeFileSync(tempPath, base64Data, 'base64');
-      tempFiles.push(tempPath);
+      fs.writeFileSync(vizPath, Buffer.from(base64Data, 'base64'));
+      filesToUpload.push(vizPath);
     }
 
-    if (tempFiles.length > 0) {
-      await fileInput.uploadFile(...tempFiles);
+    if (filesToUpload.length > 0) {
+      await fileInput.uploadFile(...filesToUpload);
       await delay(2000);
     }
+
   } finally {
-    for (const f of tempFiles) {
-      try { fs.unlinkSync(f); } catch {}
+    for (const file of filesToUpload) {
+      try {
+        fs.unlinkSync(file);
+      } catch {
+        // Ignore cleanup errors
+      }
     }
   }
 }
@@ -350,52 +352,24 @@ async function fillContactDetails(
 ): Promise<void> {
   const nameInput = await page.$('input[name*="name"], input[placeholder*="name"], input[autocomplete="name"]');
   if (nameInput) {
-    await nameInput.type(contact.name, { delay: 30 });
+    await nameInput.click({ clickCount: 3 });
+    await nameInput.type(contact.name, { delay: 50 });
   }
 
-  const emailInput = await page.$('input[type="email"], input[name*="email"], input[autocomplete="email"]');
+  const emailInput = await page.$('input[type="email"], input[name*="email"], input[placeholder*="email"]');
   if (emailInput) {
-    await emailInput.type(contact.email, { delay: 30 });
+    await emailInput.click({ clickCount: 3 });
+    await emailInput.type(contact.email, { delay: 50 });
   }
 
-  const phoneInput = await page.$('input[type="tel"], input[name*="phone"], input[name*="mobile"], input[autocomplete="tel"]');
+  const phoneInput = await page.$('input[type="tel"], input[name*="phone"], input[placeholder*="phone"], input[name*="mobile"]');
   if (phoneInput) {
-    await phoneInput.type(contact.phone, { delay: 30 });
+    await phoneInput.click({ clickCount: 3 });
+    await phoneInput.type(contact.phone, { delay: 50 });
   }
 
   await delay(500);
 
-  await findAndClickButton(page, ['submit', 'get quotes', 'continue', 'send']);
-
-  await delay(3000);
-}
-}
-
-async function fillContactDetails(
-  page: Page,
-  contact: { name: string; email: string; phone: string }
-): Promise<void> {
-  const nameInput = await page.$('input[name*="name"], input[placeholder*="name"]');
-  if (nameInput) {
-    await nameInput.type(contact.name, { delay: 30 });
-  }
-
-  const emailInput = await page.$('input[type="email"], input[name*="email"]');
-  if (emailInput) {
-    await emailInput.type(contact.email, { delay: 30 });
-  }
-
-  const phoneInput = await page.$('input[type="tel"], input[name*="phone"], input[name*="mobile"]');
-  if (phoneInput) {
-    await phoneInput.type(contact.phone, { delay: 30 });
-  }
-
-  await delay(500);
-
-  const submitButton = await page.$('button[type="submit"], button:has-text("Submit"), button:has-text("Get Quotes")');
-  if (submitButton) {
-    await submitButton.click();
-  }
-
-  await delay(3000);
+  await findAndClickButton(page, ['get quotes', 'submit', 'continue', 'send']);
+  await delay(2000);
 }
