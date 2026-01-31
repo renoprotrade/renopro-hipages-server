@@ -17,6 +17,22 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function findAndClickButton(page: Page, texts: string[]): Promise<boolean> {
+  for (const text of texts) {
+    try {
+      const buttons = await page.$$('button, input[type="submit"], a.btn, a.button');
+      for (const button of buttons) {
+        const buttonText = await page.evaluate(el => el.textContent?.trim().toLowerCase() || '', button);
+        if (buttonText.includes(text.toLowerCase())) {
+          await button.click();
+          return true;
+        }
+      }
+    } catch {}
+  }
+  return false;
+}
+
 export async function startJobPosting(
   jobId: string,
   jobData: HiPagesJobRequest,
@@ -173,15 +189,12 @@ export async function submitOtp(jobId: string, otp: string): Promise<HiPagesJobS
   try {
     const { page, browser } = session;
 
-    const otpInput = await page.$('input[type="text"][maxlength="6"], input[name="otp"], input[placeholder*="code"]');
+    const otpInput = await page.$('input[type="text"][maxlength="6"], input[name="otp"], input[placeholder*="code"], input[autocomplete="one-time-code"]');
     if (otpInput) {
       await otpInput.type(otp, { delay: 100 });
     }
 
-    const verifyButton = await page.$('button[type="submit"], button:has-text("Verify"), button:has-text("Submit")');
-    if (verifyButton) {
-      await verifyButton.click();
-    }
+    await findAndClickButton(page, ['verify', 'submit', 'confirm']);
 
     await delay(3000);
 
@@ -239,11 +252,11 @@ export function getJobStatus(jobId: string): HiPagesJobStatus | null {
 }
 
 async function fillCategory(page: Page, categoryName: string): Promise<void> {
-  const searchInput = await page.$('input[type="search"], input[placeholder*="search"], input[placeholder*="trade"]');
+  const searchInput = await page.$('input[type="search"], input[placeholder*="search"], input[placeholder*="trade"], input[placeholder*="What"]');
   if (searchInput) {
     await searchInput.type(categoryName, { delay: 50 });
-    await delay(1000);
-    const suggestion = await page.$('[role="option"], .suggestion, .autocomplete-item');
+    await delay(1500);
+    const suggestion = await page.$('[role="option"], [role="listbox"] li, .suggestion, .autocomplete-item, ul li');
     if (suggestion) {
       await suggestion.click();
     } else {
@@ -254,11 +267,11 @@ async function fillCategory(page: Page, categoryName: string): Promise<void> {
 }
 
 async function fillLocation(page: Page, postcode: string): Promise<void> {
-  const locationInput = await page.$('input[placeholder*="postcode"], input[placeholder*="suburb"], input[name*="location"]');
+  const locationInput = await page.$('input[placeholder*="postcode"], input[placeholder*="suburb"], input[placeholder*="location"], input[name*="location"], input[placeholder*="Where"]');
   if (locationInput) {
     await locationInput.type(postcode, { delay: 50 });
-    await delay(1000);
-    const suggestion = await page.$('[role="option"], .suggestion, .autocomplete-item');
+    await delay(1500);
+    const suggestion = await page.$('[role="option"], [role="listbox"] li, .suggestion, .autocomplete-item, ul li');
     if (suggestion) {
       await suggestion.click();
     }
@@ -267,9 +280,8 @@ async function fillLocation(page: Page, postcode: string): Promise<void> {
 }
 
 async function clickGetQuotes(page: Page): Promise<void> {
-  const button = await page.$('button[type="submit"], button:has-text("Get Quotes"), button:has-text("Continue")');
-  if (button) {
-    await button.click();
+  const clicked = await findAndClickButton(page, ['get quotes', 'continue', 'next', 'submit']);
+  if (clicked) {
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
   }
 }
@@ -285,17 +297,12 @@ async function answerFormQuestions(page: Page, jobData: HiPagesJobRequest): Prom
     } catch {}
   }
 
-  const continueButtons = await page.$$('button:has-text("Continue"), button:has-text("Next")');
-  for (const btn of continueButtons) {
-    try {
-      await btn.click();
-      await delay(1000);
-    } catch {}
-  }
+  await findAndClickButton(page, ['continue', 'next']);
+  await delay(1000);
 }
 
 async function fillDescription(page: Page, description: string): Promise<void> {
-  const textarea = await page.$('textarea, input[type="text"][name*="description"]');
+  const textarea = await page.$('textarea, input[type="text"][name*="description"], input[name*="details"]');
   if (textarea) {
     await textarea.type(description, { delay: 20 });
   }
@@ -335,6 +342,33 @@ async function uploadPhotos(
       try { fs.unlinkSync(f); } catch {}
     }
   }
+}
+
+async function fillContactDetails(
+  page: Page,
+  contact: { name: string; email: string; phone: string }
+): Promise<void> {
+  const nameInput = await page.$('input[name*="name"], input[placeholder*="name"], input[autocomplete="name"]');
+  if (nameInput) {
+    await nameInput.type(contact.name, { delay: 30 });
+  }
+
+  const emailInput = await page.$('input[type="email"], input[name*="email"], input[autocomplete="email"]');
+  if (emailInput) {
+    await emailInput.type(contact.email, { delay: 30 });
+  }
+
+  const phoneInput = await page.$('input[type="tel"], input[name*="phone"], input[name*="mobile"], input[autocomplete="tel"]');
+  if (phoneInput) {
+    await phoneInput.type(contact.phone, { delay: 30 });
+  }
+
+  await delay(500);
+
+  await findAndClickButton(page, ['submit', 'get quotes', 'continue', 'send']);
+
+  await delay(3000);
+}
 }
 
 async function fillContactDetails(
